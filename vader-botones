@@ -55,6 +55,54 @@ def q(s):
     return json.dumps(s, ensure_ascii=False)
 
 
+def leer_pasos(steps):
+    """Convierte los pasos de una macro de padctl en pasos de la app:
+    [{boton, mantener (ms, 0 = toque), espera (ms después)}]. None si no se entiende."""
+    out, i = [], 0
+    while i < len(steps):
+        s = steps[i]
+        if not isinstance(s, dict):
+            return None
+        if "delay" in s:
+            if not out:
+                return None
+            out[-1]["espera"] += int(s["delay"])
+            i += 1
+        elif "tap" in s:
+            out.append({"boton": s["tap"], "mantener": 0, "espera": 0})
+            i += 1
+        elif "down" in s:
+            x, h, j = s["down"], 0, i + 1
+            if j < len(steps) and isinstance(steps[j], dict) and "delay" in steps[j]:
+                h, j = int(steps[j]["delay"]), j + 1
+            if j < len(steps) and isinstance(steps[j], dict) and steps[j].get("up") == x:
+                out.append({"boton": x, "mantener": h, "espera": 0})
+                i = j + 1
+            else:
+                return None
+        else:
+            return None
+    return out
+
+
+def escribir_pasos(pasos):
+    """Pasos de la app → líneas TOML de una macro de padctl.
+    Un «tap» de padctl dura ~1 ms y los juegos (que leen el mando una vez por
+    fotograma) no lo ven, así que cada pulsación es down + espera + up."""
+    lineas = []
+    for k, p in enumerate(pasos):
+        x = q(p["boton"])
+        h = max(0, min(2000, int(p.get("mantener", 50))))
+        e = max(0, min(5000, int(p.get("espera", 0))))
+        if h > 0:
+            lineas.append(f"  {{ down = {x} }}, {{ delay = {h} }}, {{ up = {x} }},")
+        else:
+            lineas.append(f"  {{ tap = {x} }},")
+        if e > 0 and k < len(pasos) - 1:
+            lineas.append(f"  {{ delay = {e} }},")
+    return lineas
+
+
 class Backend(QObject):
     aviso = Signal(str, bool)          # texto, es_error
     perfilesCambiados = Signal()
@@ -176,7 +224,10 @@ class Backend(QObject):
                     b.update(tipo=tipo_de(pasos[0]["tap"]), valor=pasos[0]["tap"], modo="turbo",
                              turbo=max(1, round(1000 / max(1, m["repeat_delay_ms"]))))
                 else:
-                    continue
+                    lp = leer_pasos(pasos)
+                    if not lp:
+                        continue
+                    b.update(tipo="macro", pasos=lp)
             elif isinstance(val, str):
                 b.update(tipo=tipo_de(val), valor=val)
             elif isinstance(val, dict) and "tap" in val:
@@ -219,6 +270,15 @@ class Backend(QObject):
                 continue
             if tipo == "desactivado":
                 remap.append(f"{boton} = \"disabled\"")
+                continue
+            if tipo == "macro":
+                pasos = [p for p in b.get("pasos", []) if p.get("boton")]
+                if not pasos:
+                    continue
+                mn = f"macro_{boton}"
+                remap.append(f"{boton} = {q('macro:' + mn)}")
+                macros += ["[[macro]]", f"name = {q(mn)}", "steps = [",
+                           *escribir_pasos(pasos), "]", ""]
                 continue
             if not valor:
                 continue

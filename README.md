@@ -2,7 +2,7 @@
 
 Interfaz gráfica para remapear los botones extra del mando **Flydigi Vader 5 Pro** en Linux, usando [padctl](https://github.com/BANANASJIM/padctl).
 
-> *English: a small GUI for Linux to remap the extra buttons (M1–M4 paddles, C, Z, LM, RM, O), add turbo, tap/hold actions and gyro aiming on the Flydigi Vader 5 Pro. It writes padctl mapping profiles; nothing is written to the controller.*
+> *English: a small GUI for Linux to remap the extra buttons (M1–M4 paddles, C, Z, LM, RM, O), add turbo, tap/hold actions, multi-step macros and gyro aiming on the Flydigi Vader 5 Pro. It writes padctl mapping profiles; nothing is written to the controller.*
 
 ![Captura](docs/captura.png)
 
@@ -25,6 +25,7 @@ Todo el mérito técnico del manejo del mando es de padctl y de su autor. Esta a
   - o nada (desactivado).
 - **Turbo**: repite el botón entre 2 y 30 veces por segundo mientras lo mantienes.
 - **Pulsar / mantener**: una acción con toque corto y otra al mantenerlo.
+- **Macros**: una secuencia de botones del mando o teclas con un solo botón, eligiendo cuánto se mantiene pulsado cada paso y cuánto se espera entre pasos. Incluye una plantilla de *quit out* para Elden Ring. Cada paso se mantiene pulsado (50 ms por defecto) porque los juegos no detectan las pulsaciones instantáneas.
 - **Giroscopio**: apuntar moviendo el mando, como ratón o como stick derecho, siempre o solo mientras mantienes un botón.
 - **Perfiles**: crea, duplica, renombra y borra perfiles; aplica uno al momento o vuelve a «de fábrica».
 

@@ -33,7 +33,7 @@ Window {
     property string mantTipoElegido: ""
     onSelChanged: mantTipoElegido = ""
     readonly property string mantTipo: mantTipoElegido || (b.mantener ? (b.mantener.indexOf("KEY_") === 0 ? "tecla" : b.mantener.indexOf("mouse_") === 0 ? "raton" : "mando") : "mando")
-    readonly property var b: perfil.botones[sel] || ({ tipo: "original", valor: "", modo: "normal", turbo: 12, mantener: "", mantenerMs: 300 })
+    readonly property var b: perfil.botones[sel] || ({ tipo: "original", valor: "", modo: "normal", turbo: 12, mantener: "", mantenerMs: 300, pasos: [] })
 
     readonly property var info: ({
         "M1": ["PALETA M1", "trasera · arriba derecha"],
@@ -72,6 +72,10 @@ Window {
         var x = perfil.botones[boton]
         if (!x || x.tipo === "original") return "de fábrica"
         if (x.tipo === "desactivado") return "DESACTIVADO"
+        if (x.tipo === "macro") {
+            var n = (x.pasos || []).length
+            return n ? "MACRO · " + n + (n === 1 ? " PASO" : " PASOS") : "MACRO VACÍA"
+        }
         if (!x.valor) return "sin elegir"
         var s = nombreDe(x.valor)
         if (x.modo === "turbo") s += " · TURBO " + x.turbo + "/s"
@@ -81,12 +85,36 @@ Window {
     function clonar(o) { return JSON.parse(JSON.stringify(o)) }
     function cambiar(cambios) {
         var p = clonar(perfil)
-        var x = p.botones[sel] || { tipo: "original", valor: "", modo: "normal", turbo: 12, mantener: "", mantenerMs: 300 }
+        var x = p.botones[sel] || { tipo: "original", valor: "", modo: "normal", turbo: 12, mantener: "", mantenerMs: 300, pasos: [] }
         for (var k in cambios) x[k] = cambios[k]
         if (x.tipo === "original") delete p.botones[sel]
         else p.botones[sel] = x
         perfil = p; sucio = true
     }
+    // ---------- macros ----------
+    property string macroTipo: "mando"      // qué se muestra para añadir pasos
+    property int macroMantener: 50          // valores para los pasos nuevos
+    property int macroEspera: 150
+    function cambiarPasos(f) { var ps = clonar(b.pasos || []); f(ps); cambiar({ pasos: ps }) }
+    function duracion(ps) {
+        var t = 0
+        for (var i = 0; i < ps.length; i++) t += (ps[i].mantener || 1) + (i < ps.length - 1 ? ps[i].espera : 0)
+        return t
+    }
+    function escalar(f) {
+        cambiarPasos(function (ps) {
+            for (var i = 0; i < ps.length; i++) ps[i].espera = Math.max(0, Math.min(1000, Math.round(ps[i].espera * f / 10) * 10))
+        })
+    }
+    readonly property var plantillas: [
+        { nombre: "QUIT OUT ELDEN RING", pasos: [
+            ["Start", 50, 250], ["DPadUp", 50, 100], ["A", 50, 250], ["LB", 50, 150],
+            ["A", 50, 250], ["DPadLeft", 50, 100], ["A", 50, 0]] }
+    ]
+    function usarPlantilla(t) {
+        cambiar({ pasos: t.pasos.map(function (p) { return { boton: p[0], mantener: p[1], espera: p[2] } }) })
+    }
+
     function cambiarGyro(cambios) {
         var p = clonar(perfil)
         for (var k in cambios) p.gyro[k] = cambios[k]
@@ -298,11 +326,14 @@ Window {
             Flow {
                 width: parent.width; spacing: 8
                 Repeater {
-                    model: [["original", "DE FÁBRICA"], ["mando", "BOTÓN DEL MANDO"], ["tecla", "TECLA"], ["raton", "RATÓN"], ["desactivado", "DESACTIVAR"]]
+                    model: [["original", "DE FÁBRICA"], ["mando", "BOTÓN DEL MANDO"], ["tecla", "TECLA"], ["raton", "RATÓN"], ["macro", "MACRO"], ["desactivado", "DESACTIVAR"]]
                     Boton {
                         texto: modelData[1]; activo: w.b.tipo === modelData[0]
-                        onPulsado: w.cambiar({ tipo: modelData[0], valor: modelData[0] === w.b.tipo ? w.b.valor : "",
-                                               modo: (modelData[0] === "raton" && w.b.modo === "turbo") ? "normal" : w.b.modo })
+                        onPulsado: {
+                            if (modelData[0] === "macro") w.cambiar({ tipo: "macro", valor: "", modo: "normal", pasos: w.b.pasos || [] })
+                            else w.cambiar({ tipo: modelData[0], valor: modelData[0] === w.b.tipo ? w.b.valor : "",
+                                             modo: (modelData[0] === "raton" && w.b.modo === "turbo") ? "normal" : w.b.modo })
+                        }
                     }
                 }
             }
@@ -389,6 +420,75 @@ Window {
                 }
             }
 
+            // Macro
+            Column {
+                visible: w.b.tipo === "macro"
+                width: parent.width; spacing: 10
+                Mono {
+                    width: parent.width; wrapMode: Text.Wrap; color: Pal.apagado; font.pixelSize: 11; tracking: 0.5; lineHeight: 1.25
+                    text: "Al pulsar este botón se hacen los pasos en orden, una vez. MANTENER es cuánto tiempo se pulsa cada botón: los juegos leen el mando una vez por fotograma, así que hace falta al menos 35–50 ms. ESPERA es la pausa antes del siguiente paso (los menús tardan en abrirse)."
+                }
+                Seccion {
+                    width: parent.width
+                    texto: "PASOS · " + (w.b.pasos || []).length + " · DURA " + (w.duracion(w.b.pasos || []) / 1000).toFixed(2).replace(".", ",") + " S"
+                }
+                Mono {
+                    visible: !(w.b.pasos || []).length
+                    width: parent.width; wrapMode: Text.Wrap; color: Pal.texto2; font.pixelSize: 11
+                    text: "Todavía no hay pasos: añádelos abajo o usa una plantilla."
+                }
+                Repeater {
+                    model: w.b.pasos || []
+                    PasoFila { indice: index; paso: modelData; ultimo: index === w.b.pasos.length - 1 }
+                }
+                Mono {
+                    visible: (w.b.pasos || []).some(function (p) { return !p.mantener })
+                    width: parent.width; wrapMode: Text.Wrap; color: Pal.alerta; font.pixelSize: 11; tracking: 0.5
+                    text: "Ojo: los pasos en TOQUE se pulsan durante ~1 ms y casi ningún juego los detecta."
+                }
+                Flow {
+                    visible: (w.b.pasos || []).length > 0
+                    width: parent.width; spacing: 8
+                    Boton { texto: "PULSAR 50 MS TODOS"; tam: 10; implicitHeight: 26
+                            visible: (w.b.pasos || []).some(function (p) { return !p.mantener })
+                            onPulsado: w.cambiarPasos(function (ps) { for (var i = 0; i < ps.length; i++) if (!ps[i].mantener) ps[i].mantener = 50 }) }
+                    Boton { texto: "ESPERAS MÁS LARGAS"; tam: 10; implicitHeight: 26; onPulsado: w.escalar(1.25) }
+                    Boton { texto: "ESPERAS MÁS CORTAS"; tam: 10; implicitHeight: 26; onPulsado: w.escalar(0.8) }
+                    Boton { texto: "VACIAR"; peligro: true; tam: 10; implicitHeight: 26; onPulsado: w.cambiar({ pasos: [] }) }
+                }
+
+                Seccion { texto: "AÑADIR PASO"; width: parent.width }
+                Flow {
+                    width: parent.width; spacing: 8
+                    Boton { texto: "BOTÓN DEL MANDO"; tam: 10; implicitHeight: 26; activo: w.macroTipo === "mando"; onPulsado: w.macroTipo = "mando" }
+                    Boton { texto: "TECLA"; tam: 10; implicitHeight: 26; activo: w.macroTipo === "tecla"; onPulsado: w.macroTipo = "tecla" }
+                }
+                Flow {
+                    width: parent.width; spacing: 6
+                    Repeater {
+                        model: w.macroTipo === "tecla" ? w.cat.teclas : w.cat.mando
+                        Boton {
+                            texto: modelData.indexOf("KEY_") === 0 ? modelData.substring(4) : w.nombreDe(modelData)
+                            tam: 10; implicitHeight: 26
+                            onPulsado: w.cambiarPasos(function (ps) { ps.push({ boton: modelData, mantener: w.macroMantener, espera: w.macroEspera }) })
+                        }
+                    }
+                }
+                Mono {
+                    width: parent.width; wrapMode: Text.Wrap; color: Pal.apagado; font.pixelSize: 10; tracking: 0.5
+                    text: "Cada clic añade un paso al final (" + w.macroMantener + " ms pulsado, " + w.macroEspera + " ms de espera). Luego puedes ajustarlo arriba."
+                }
+
+                Seccion { texto: "PLANTILLAS"; width: parent.width }
+                Flow {
+                    width: parent.width; spacing: 8
+                    Repeater {
+                        model: w.plantillas
+                        Boton { texto: modelData.nombre; tam: 10; implicitHeight: 26; onPulsado: w.usarPlantilla(modelData) }
+                    }
+                }
+            }
+
             // Giroscopio
             Item { width: 1; height: 6 }
             Seccion { texto: "GIROSCOPIO (APUNTAR MOVIENDO EL MANDO)"; width: parent.width }
@@ -426,6 +526,77 @@ Window {
                 }
             }
             Item { width: 1; height: 10 }
+        }
+    }
+
+    // Una fila del editor de macros.
+    component PasoFila: Item {
+        id: pf
+        property int indice
+        property var paso
+        property bool ultimo
+        width: colDer.width; height: 40
+        Chaflan { anchors.fill: parent; tl: 7; br: 7; relleno: Pal.panel; borde: Pal.linea }
+        Row {
+            anchors.verticalCenter: parent.verticalCenter; x: 10; spacing: 8
+            Mono { text: (pf.indice < 9 ? "0" : "") + (pf.indice + 1); color: Pal.neon; font.pixelSize: 11; width: 20; anchors.verticalCenter: parent.verticalCenter }
+            Mono {
+                text: pf.paso.boton.indexOf("KEY_") === 0 ? "TECLA " + pf.paso.boton.substring(4) : w.nombreDe(pf.paso.boton)
+                color: Pal.texto; font.pixelSize: 11; width: 84; elide: Text.ElideRight; anchors.verticalCenter: parent.verticalCenter
+            }
+            MiniDeslizador {
+                etiqueta: "MANTENER"; hasta: 300; valor: pf.paso.mantener; cero: "TOQUE"
+                onSoltado: (v) => w.cambiarPasos(function (ps) { ps[pf.indice].mantener = v })
+            }
+            MiniDeslizador {
+                visible: !pf.ultimo
+                etiqueta: "ESPERA"; hasta: 1000; valor: pf.paso.espera; cero: "0 ms"
+                onSoltado: (v) => w.cambiarPasos(function (ps) { ps[pf.indice].espera = v })
+            }
+        }
+        Row {
+            anchors.verticalCenter: parent.verticalCenter; anchors.right: parent.right; anchors.rightMargin: 8; spacing: 4
+            Boton { texto: "↑"; tam: 10; implicitWidth: 26; implicitHeight: 24; habilitado: pf.indice > 0
+                    onPulsado: w.cambiarPasos(function (ps) { var x = ps.splice(pf.indice, 1)[0]; ps.splice(pf.indice - 1, 0, x) }) }
+            Boton { texto: "↓"; tam: 10; implicitWidth: 26; implicitHeight: 24; habilitado: !pf.ultimo
+                    onPulsado: w.cambiarPasos(function (ps) { var x = ps.splice(pf.indice, 1)[0]; ps.splice(pf.indice + 1, 0, x) }) }
+            Boton { texto: "✕"; tam: 10; implicitWidth: 26; implicitHeight: 24; peligro: true
+                    onPulsado: w.cambiarPasos(function (ps) { ps.splice(pf.indice, 1) }) }
+        }
+    }
+
+    // Deslizador pequeño: solo avisa al soltar (las filas se recrean al cambiar el perfil).
+    component MiniDeslizador: Row {
+        id: md
+        property string etiqueta
+        property real hasta: 100
+        property real valor: 0
+        property string cero: ""
+        signal soltado(int v)
+        spacing: 5
+        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+        Mono { text: md.etiqueta; color: Pal.apagado; font.pixelSize: 9; anchors.verticalCenter: parent.verticalCenter }
+        Slider {
+            id: ms
+            width: 74; from: 0; to: md.hasta; stepSize: 10; value: md.valor
+            anchors.verticalCenter: parent.verticalCenter
+            onPressedChanged: if (!pressed && Math.round(value) !== Math.round(md.valor)) md.soltado(Math.round(value))
+            background: Item {
+                x: ms.leftPadding; y: ms.topPadding + ms.availableHeight / 2 - 1
+                width: ms.availableWidth; height: 2
+                Rectangle { anchors.fill: parent; color: Pal.linea }
+                Rectangle { width: ms.visualPosition * parent.width; height: 2; color: Pal.neon }
+            }
+            handle: Rectangle {
+                x: ms.leftPadding + ms.visualPosition * (ms.availableWidth - width)
+                y: ms.topPadding + ms.availableHeight / 2 - height / 2
+                width: 10; height: 10; rotation: 45; color: ms.pressed ? Pal.texto : Pal.neon
+            }
+        }
+        Mono {
+            width: 46; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 10
+            text: Math.round(ms.value) === 0 && md.cero ? md.cero : Math.round(ms.value) + " ms"
+            color: Math.round(ms.value) === 0 && md.etiqueta === "MANTENER" ? Pal.alerta : Pal.neon
         }
     }
 
