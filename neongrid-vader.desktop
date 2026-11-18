@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vader · Botones
+Comment=Cambiar los botones extra del Flydigi Vader 5 Pro (padctl)
+Exec=neongrid-vader
+Icon=input-gaming
+Categories=Settings;HardwareSettings;
+Keywords=mando;vader;flydigi;padctl;botones;paletas;

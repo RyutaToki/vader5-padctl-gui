@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""VADER · BOTONES — editor de perfiles de padctl para el Flydigi Vader 5 Pro.
+
+Solo escribe archivos de mapeo de padctl (~/.config/padctl/mappings/) y, cuando
+el usuario pulsa «Aplicar», ejecuta `padctl reload` + `padctl switch <perfil>`.
+Nunca envía comandos internos de Flydigi al mando: todo el remapeo lo hace padctl
+por software.
+
+Opciones de prueba:
+  --prueba          carpeta de configuración temporal y padctl simulado
+  --captura F.png   renderiza la ventana a una imagen y sale (usar con
+                    QT_QPA_PLATFORM=offscreen)
+  --pasos JSON      acciones a ejecutar antes de la captura (solo pruebas)
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QGuiApplication, QIcon
+from PySide6.QtQml import QQmlApplicationEngine
+
+AQUI = Path(__file__).resolve().parent
+MARCA = "# Creado con VADER · BOTONES (neon-grid). Puedes editarlo a mano."
+EXTRA = ["M1", "M2", "M3", "M4", "C", "Z", "LM", "RM", "O"]
+NORMALES = ["A", "B", "X", "Y", "LB", "RB", "LS", "RS", "Start", "Select", "Home",
+            "DPadUp", "DPadDown", "DPadLeft", "DPadRight"]
+BOTONES_MANDO = NORMALES[:11] + ["LT", "RT"] + NORMALES[11:]
+RATON = ["mouse_left", "mouse_right", "mouse_middle", "mouse_side", "mouse_extra",
+         "mouse_forward", "mouse_back"]
+
+
+def slug(texto):
+    s = re.sub(r"[^a-z0-9-]+", "-", texto.strip().lower()).strip("-")
+    return s[:40] or "perfil"
+
+
+def tipo_de(valor):
+    if valor == "disabled":
+        return "desactivado"
+    if valor.startswith("KEY_"):
+        return "tecla"
+    if valor.startswith("mouse_"):
+        return "raton"
+    return "mando"
+
+
+def q(s):
+    return json.dumps(s, ensure_ascii=False)
+
+
+class Backend(QObject):
+    aviso = Signal(str, bool)          # texto, es_error
+    perfilesCambiados = Signal()
+    estadoCambiado = Signal()
+
+    def __init__(self, dir_mapeos, simulado):
+        super().__init__()
+        self.dir = Path(dir_mapeos)
+        self.simulado = simulado
+        self._estado = {"conectado": False, "perfil": "", "texto": "…"}
+        self._sim_perfil = ""
+        self.leer_estado()
+
+    # ---------- utilidades ----------
+    def _padctl(self, *args, timeout=8):
+        if self.simulado:
+            if args[0] == "status":
+                p = self._sim_perfil or "(none)"
+                return 0, (f"STATUS device=Flydigi Vader 5 Pro state=active mapping={p} "
+                           "phys_key=usb-sim vid=0x37d7 pid=0x2401"), ""
+            if args[0] == "switch":
+                self._sim_perfil = args[1]
+                return 0, f"switched to {args[1]}", ""
+            if args[0] == "reload":
+                return 0, "", ""
+        if not shutil.which("padctl"):
+            return 127, "", "padctl no está instalado"
+        try:
+            r = subprocess.run(["padctl", *args], capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired:
+            return 124, "", "padctl no respondió a tiempo"
+
+    def _ruta(self, nombre):
+        return self.dir / f"{slug(nombre)}.toml"
+
+    # ---------- estado ----------
+    @Slot(result="QVariantMap")
+    def estado(self):
+        return self._estado
+
+    @Slot()
+    def leer_estado(self):
+        rc, out, err = self._padctl("status")
+        est = {"conectado": False, "perfil": "", "texto": "MANDO NO DETECTADO"}
+        for linea in out.splitlines():
+            if "Vader" in linea:
+                m = re.search(r"state=(\S+)", linea)
+                mp = re.search(r"mapping=(\S+)", linea)
+                est["conectado"] = bool(m and m.group(1) == "active")
+                p = mp.group(1) if mp else ""
+                est["perfil"] = "" if p in ("(none)", "") else p
+                est["texto"] = "CONECTADO" if est["conectado"] else "EN PAUSA"
+        if rc != 0 and not out:
+            est["texto"] = "PADCTL NO RESPONDE"
+        if est != self._estado:
+            self._estado = est
+            self.estadoCambiado.emit()
+
+    # ---------- catálogos ----------
+    @Slot(result="QVariantMap")
+    def catalogo(self):
+        teclas = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+        teclas += [str(n) for n in range(10)]
+        teclas += [f"F{n}" for n in range(1, 25)]
+        teclas += ["ESC", "ENTER", "SPACE", "TAB", "BACKSPACE", "LEFTSHIFT", "LEFTCTRL",
+                   "LEFTALT", "RIGHTSHIFT", "RIGHTCTRL", "RIGHTALT", "LEFTMETA", "CAPSLOCK",
+                   "UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PAGEUP", "PAGEDOWN",
+                   "INSERT", "DELETE", "MINUS", "EQUAL", "COMMA", "DOT", "SLASH",
+                   "SEMICOLON", "APOSTROPHE", "GRAVE", "BACKSLASH", "LEFTBRACE", "RIGHTBRACE",
+                   "KP0", "KP1", "KP2", "KP3", "KP4", "KP5", "KP6", "KP7", "KP8", "KP9",
+                   "KPPLUS", "KPMINUS", "KPENTER", "SYSRQ", "PAUSE", "MUTE", "VOLUMEUP",
+                   "VOLUMEDOWN", "PLAYPAUSE", "NEXTSONG", "PREVIOUSSONG"]
+        return {
+            "extra": EXTRA,
+            "normales": NORMALES,
+            "mando": BOTONES_MANDO,
+            "teclas": ["KEY_" + t for t in teclas],
+            "raton": RATON,
+        }
+
+    # ---------- perfiles ----------
+    @Slot(result="QVariantList")
+    def perfiles(self):
+        if not self.dir.is_dir():
+            return []
+        out = []
+        for f in sorted(self.dir.glob("*.toml")):
+            try:
+                d = tomllib.loads(f.read_text())
+                nombre = d.get("name", f.stem)
+            except Exception:
+                nombre = f.stem
+            out.append(nombre)
+        return out
+
+    @Slot(str, result="QVariantMap")
+    def cargar(self, nombre):
+        vacio = {"nombre": nombre, "botones": {}, "gyro": {"modo": "off", "activar": "",
+                 "sensibilidad": 2.0}, "propio": True}
+        f = self._buscar(nombre)
+        if not f:
+            return vacio
+        try:
+            texto = f.read_text()
+            d = tomllib.loads(texto)
+        except Exception as e:
+            self.aviso.emit(f"No se pudo leer {f.name}: {e}", True)
+            return vacio
+        macros = {m.get("name"): m for m in d.get("macro", [])}
+        botones = {}
+        for boton, val in d.get("remap", {}).items():
+            b = {"tipo": "original", "valor": "", "modo": "normal", "turbo": 12,
+                 "mantener": "", "mantenerMs": 300}
+            if isinstance(val, str) and val.startswith("macro:"):
+                m = macros.get(val[6:], {})
+                pasos = m.get("steps", [])
+                if m.get("repeat_delay_ms") and len(pasos) == 1 and isinstance(pasos[0], dict) and "tap" in pasos[0]:
+                    b.update(tipo=tipo_de(pasos[0]["tap"]), valor=pasos[0]["tap"], modo="turbo",
+                             turbo=max(1, round(1000 / max(1, m["repeat_delay_ms"]))))
+                else:
+                    continue
+            elif isinstance(val, str):
+                b.update(tipo=tipo_de(val), valor=val)
+            elif isinstance(val, dict) and "tap" in val:
+                b.update(tipo=tipo_de(val["tap"]), valor=val["tap"])
+                if "hold" in val:
+                    b.update(modo="mantener", mantener=val["hold"],
+                             mantenerMs=int(val.get("hold_ms", 300)))
+            else:
+                continue
+            botones[boton] = b
+        g = d.get("gyro", {})
+        modo = g.get("mode", "off")
+        modo = {"mouse": "raton", "joystick": "joystick"}.get(modo, "off")
+        act = str(g.get("activate", ""))
+        act = act[5:] if act.startswith("hold_") else act
+        sens = float(g.get("sensitivity", 2.0 if modo != "joystick" else 100.0))
+        return {"nombre": d.get("name", nombre), "botones": botones,
+                "gyro": {"modo": modo, "activar": act, "sensibilidad": sens},
+                "propio": MARCA in texto}
+
+    def _buscar(self, nombre):
+        if not self.dir.is_dir():
+            return None
+        for f in self.dir.glob("*.toml"):
+            try:
+                if tomllib.loads(f.read_text()).get("name", f.stem) == nombre:
+                    return f
+            except Exception:
+                if f.stem == nombre:
+                    return f
+        return None
+
+    def _toml(self, perfil):
+        nombre = slug(perfil["nombre"])
+        lineas = [MARCA, f"name = {q(nombre)}", ""]
+        remap, macros = [], []
+        for boton, b in perfil.get("botones", {}).items():
+            tipo, valor = b.get("tipo", "original"), b.get("valor", "")
+            if tipo == "original":
+                continue
+            if tipo == "desactivado":
+                remap.append(f"{boton} = \"disabled\"")
+                continue
+            if not valor:
+                continue
+            modo = b.get("modo", "normal")
+            if modo == "turbo" and tipo in ("mando", "tecla"):
+                veces = max(1, min(30, int(b.get("turbo", 12))))
+                mn = f"turbo_{boton}"
+                remap.append(f"{boton} = {q('macro:' + mn)}")
+                macros += ["[[macro]]", f"name = {q(mn)}",
+                           f"repeat_delay_ms = {round(1000 / veces)}",
+                           f"steps = [{{ tap = {q(valor)} }}]", ""]
+            elif modo == "mantener" and b.get("mantener"):
+                ms = max(100, min(2000, int(b.get("mantenerMs", 300))))
+                remap.append(f"{boton} = {{ tap = {q(valor)}, hold = {q(b['mantener'])}, hold_ms = {ms} }}")
+            else:
+                remap.append(f"{boton} = {q(valor)}")
+        if remap:
+            lineas += ["[remap]", *remap, ""]
+        g = perfil.get("gyro", {})
+        if g.get("modo", "off") != "off":
+            lineas += ["[gyro]"]
+            if g["modo"] == "raton":
+                lineas += ["mode = \"mouse\""]
+            else:
+                lineas += ["mode = \"joystick\"", "target = \"right_stick\""]
+            if g.get("activar"):
+                lineas += [f"activate = {q('hold_' + g['activar'])}"]
+            lineas += [f"sensitivity = {float(g.get('sensibilidad', 2.0)):.2f}", ""]
+        lineas += macros
+        return nombre, "\n".join(lineas).rstrip() + "\n"
+
+    def _validar(self, ruta):
+        if self.simulado and not shutil.which("padctl"):
+            return True, ""
+        rc, out, err = self._padctl("--validate", str(ruta))
+        texto = (err or out).strip()
+        errores = [l.split("error: ", 1)[-1] for l in texto.splitlines() if "error" in l]
+        return rc == 0, "; ".join(errores) or texto
+
+    @Slot("QVariantMap", result=str)
+    def guardar(self, perfil):
+        """Guarda el perfil. Devuelve el nombre final o '' si hubo error."""
+        nombre, contenido = self._toml(perfil)
+        anterior = perfil.get("anterior") or ""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkstemp(suffix=".toml", dir=self.dir.parent)[1])
+        tmp.write_text(contenido)
+        ok, msg = self._validar(tmp)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            self.aviso.emit(f"padctl rechazó el perfil: {msg}", True)
+            return ""
+        destino = self._ruta(nombre)
+        viejo = self._buscar(anterior) if anterior and anterior != nombre else None
+        if destino.exists() and MARCA not in destino.read_text():
+            shutil.copy2(destino, destino.with_suffix(".toml.bak"))
+        shutil.move(tmp, destino)
+        if viejo and viejo != destino:
+            viejo.unlink(missing_ok=True)
+        self.perfilesCambiados.emit()
+        self.aviso.emit(f"Perfil «{nombre}» guardado", False)
+        return nombre
+
+    @Slot(str, result=bool)
+    def borrar(self, nombre):
+        f = self._buscar(nombre)
+        if not f:
+            return False
+        if self._estado.get("perfil") == nombre:
+            self.aviso.emit("Ese perfil está en uso: aplica otro antes de borrarlo", True)
+            return False
+        f.unlink()
+        self.perfilesCambiados.emit()
+        self.aviso.emit(f"Perfil «{nombre}» borrado", False)
+        return True
+
+    @Slot(str, result=str)
+    def vistaToml(self, nombre):
+        f = self._buscar(nombre)
+        return f.read_text() if f else ""
+
+    @Slot("QVariantMap", result=str)
+    def previsualizar(self, perfil):
+        return self._toml(perfil)[1]
+
+    @Slot(str, result=bool)
+    def aplicar(self, nombre):
+        # Sin «padctl reload»: reinicia la conexión con el mando y el switch
+        # llega antes de que vuelva. «switch» ya relee el archivo.
+        rc, out, err = self._padctl("switch", nombre)
+        self.leer_estado()
+        if rc != 0:
+            self.aviso.emit(f"No se pudo aplicar: {(err or out).strip()[:160]}", True)
+            return False
+        self.aviso.emit(f"Perfil «{nombre}» activo en el mando", False)
+        return True
+
+    @Slot(result=bool)
+    def original(self):
+        """Vuelve a los botones de fábrica: perfil vacío «original»."""
+        n = self.guardar({"nombre": "original", "botones": {}, "gyro": {"modo": "off"}})
+        return bool(n) and self.aplicar(n)
+
+
+def main():
+    args = sys.argv[1:]
+    prueba = "--prueba" in args
+    captura = args[args.index("--captura") + 1] if "--captura" in args else ""
+    pasos = args[args.index("--pasos") + 1] if "--pasos" in args else ""
+
+    if prueba:
+        base = Path(os.environ.get("VADER_PRUEBA_DIR") or tempfile.mkdtemp(prefix="vader-prueba-"))
+        dir_mapeos = base / "padctl" / "mappings"
+    else:
+        cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        dir_mapeos = cfg / "padctl" / "mappings"
+
+    os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
+    app = QGuiApplication(sys.argv[:1])
+    app.setApplicationName("VADER · BOTONES")
+    app.setDesktopFileName("neongrid-vader")
+    app.setWindowIcon(QIcon.fromTheme("input-gaming"))
+    back = Backend(dir_mapeos, prueba)
+    eng = QQmlApplicationEngine()
+    eng.rootContext().setContextProperty("backend", back)
+    eng.rootContext().setContextProperty("modoPrueba", prueba and not os.environ.get("VADER_CAPTURA_LIMPIA"))
+    eng.load(QUrl.fromLocalFile(str(AQUI / "Vader.qml")))
+    if not eng.rootObjects():
+        sys.exit(1)
+    win = eng.rootObjects()[0]
+
+    t = QTimer()
+    t.timeout.connect(back.leer_estado)
+    t.start(5000)
+
+    if captura:
+        def hacer_pasos():
+            if pasos:
+                for p in json.loads(pasos):
+                    win.setProperty("pasoPrueba", json.dumps(p))
+                    app.processEvents()
+
+        def capturar():
+            win.setProperty("capturaRuta", captura)
+        QTimer.singleShot(300, hacer_pasos)
+        QTimer.singleShot(900, capturar)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
